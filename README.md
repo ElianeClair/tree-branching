@@ -11,8 +11,8 @@
 1. [单条消息的样子](#1-单条消息的样子)
 2. [编辑（Edit）、重试（Retry）与继续对话](#2-编辑edit重试retry与继续对话)
 3. [为什么让服务端做决策](#3-为什么让服务端做决策)
-4. [前端怎样正确渲染对话树](#4-前端怎样正确渲染对话树)
-5. [实现分支之间的来回切换](#5-实现分支之间的来回切换)
+4. [前端怎样渲染与导航对话树](#4-前端怎样渲染与导航对话树)
+5. [把分支状态同步到服务端](#5-把分支状态同步到服务端)
 6. [怎么安全地存到磁盘](#6-怎么安全地存到磁盘)
 7. [重申前文注意事项（摘要）](#7-重申前文注意事项摘要)
 - [附：不用服务端也能跑吗](#附不用服务端也能跑吗)
@@ -159,7 +159,7 @@ async function addNode(parentId, role, content) {
 
 > **为什么分支切换也走服务端？** `currentLeaf` 需要持久化。例如，就算用户刷新浏览器或是关闭浏览器再打开，页面仍显示离开前停留的那条分支路径。
 
-## 4 前端怎样正确渲染对话树
+## 4 前端怎样渲染与导航对话树
 
 渲染当前对话：调用 `getPath()`，拿到一个数组，从头到尾画。**跟画一个线性对话完全一样**——对话树的复杂度被 `getPath()` 吸收了，渲染层看到的就是一个数组。
 
@@ -194,9 +194,9 @@ function renderBranchNav(node) {
 }
 ```
 
-## 5 实现分支之间的来回切换
+### 分支切换——纯前端就能完成
 
-用户点击分支导航器的箭头时，需要从目标兄弟节点开始一路往下走到最深的叶子。这条路上每遇到分支就取最新的（最后一个子节点）。
+导航箭头画出来了，接下来让它能点。用户点击箭头时，需要从目标兄弟节点开始一路往下走到最深的叶子——这条路上每遇到分支就取最新的（最后一个子节点）：
 
 ```js
 function walkToLeaf(nodes, startId) {
@@ -208,7 +208,26 @@ function walkToLeaf(nodes, startId) {
 }
 ```
 
-切换分支 = 找到目标兄弟 → `walkToLeaf` 走到底 → 把结果写入 `currentLeaf` → 用新的 `getPath()` 重新渲染。
+切换分支 = 找到目标兄弟 → `walkToLeaf` 走到底 → 把结果写入 `currentLeaf` → 用新的 `getPath()` 重新渲染。这个操作**不需要服务端参与**——它操作的全是内存里已有的树结构：
+
+```js
+function switchBranch(nodeId, delta) {
+  const parent = tree.nodes[tree.nodes[nodeId].parentId];
+  const newSibling = parent.children[parent.children.indexOf(nodeId) + delta];
+  tree.currentLeaf = walkToLeaf(tree.nodes, newSibling);
+  renderConversation();
+}
+```
+
+到这里为止，你已经有了一个**完整可用的分支导航器**：能渲染当前路径、能画出分支箭头、能点击切换到不同分支。全部逻辑跑在浏览器里，零网络请求。如果你的对话树存在 localStorage 里（见附录），这就够了——拖一个 HTML 文件进浏览器就能体验完整的分支切换。
+
+## 5 把分支状态同步到服务端
+
+上一章你已经有了一个能在本地切换分支的导航器。那为什么我们的实现里还要把 `switchBranch` 的结果发给服务端？
+
+因为 `currentLeaf` 需要**持久化**。纯本地版的切换改的是内存里的变量——刷新页面就丢了。如果你需要：刷新后仍停在上次看的分支、换一台设备接着看、多标签页不互相踩——你就需要服务端来持有 `currentLeaf` 的权威副本。
+
+把上一章的纯本地版升级成走服务端只需要一步改动——把本地赋值换成一次 API 请求：
 
 ```js
 async function switchBranch(nodeId, delta) {
@@ -223,6 +242,10 @@ async function switchBranch(nodeId, delta) {
   renderConversation();
 }
 ```
+
+逻辑完全一样——找兄弟、走到叶子、更新指针、重新渲染。唯一的区别是 `walkToLeaf` 跑在服务端而不是浏览器里，结果通过 API 返回。这样 `currentLeaf` 的变更被写进了磁盘，刷新不丢、跨设备同步。
+
+> **为什么分支切换也走服务端？** 不是因为切换逻辑需要服务端——上一章证明了它不需要。是因为 `currentLeaf` 作为持久化状态，它的权威副本应该和对话树的其他数据放在一起。前端可以自己算出正确的 leafId（它确实也在第4章这样做了），但最终要把这个结果"报备"给服务端，让服务端的磁盘副本保持同步。
 
 ## 6 怎么安全地存到磁盘
 
@@ -283,9 +306,9 @@ function saveConv(id, conv) {
 
 ## 附：不用服务端也能跑吗
 
-能。上面所有章节围绕一个"服务端权威"的架构展开，但对话树本身是一个**纯逻辑的数据结构**——节点、parentId、currentLeaf、getPath()、addNode()——这些代码不关心自己住在哪里。它们在服务端的 JSON 文件里能跑，在浏览器的 localStorage 里也一样能跑。
+能。第4章已经证明了——`getPath()`、`renderBranchNav()`、`walkToLeaf()`、`switchBranch()` 全部是纯前端逻辑，不需要任何网络请求就能完整运行。对话树本身是一个**纯逻辑的数据结构**——节点、parentId、currentLeaf——这些代码不关心自己住在哪里。
 
-"服务端权威"是一个**架构选择**，不是对话树的前置条件。本篇选择它是因为实际场景需要跨设备同步、崩溃恢复和多标签页隔离。但如果你的需求更简单——只想在本地浏览器里体验对话分叉——可以把所有 `fetch('/api/...')` 换成 localStorage 的读写：
+第3、5、6章围绕"服务端权威"展开，但那是一个**架构选择**，不是对话树的前置条件。本篇选择它是因为实际场景需要跨设备同步、崩溃恢复和多标签页隔离。如果你的需求更简单——只想在本地浏览器里体验对话分叉——把第3章的 `addNode` 从 fetch 换成 localStorage 读写就行：
 
 ```js
 // 纯本地版的 addNode — 逻辑和服务端版完全一样，只是存储换了位置
@@ -303,7 +326,7 @@ function addNode(parentId, role, content) {
 }
 ```
 
-getPath()、renderBranchNav()、walkToLeaf()、switchBranch()、rebuildChildren()——一个字都不用改。它们操作的是树的逻辑结构，跟数据存在哪无关。
+第4章的 `switchBranch()` 本来就不走网络——直接拿来用。`rebuildChildren()` 同理。纯本地版需要替换的只有涉及 `fetch` 的部分（addNode、第5章版的 switchBranch），其余函数一个字都不用改。
 
 纯本地版丢掉的东西：换浏览器就看不到（没有跨设备）、清缓存就没了（没有持久备份）、两个标签页同时操作可能互相踩（没有并发控制）。得到的东西：零部署门槛，一个 HTML 文件拖进浏览器就能用。
 
